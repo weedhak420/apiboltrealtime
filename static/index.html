@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full bg-gray-900 text-slate-100">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Bolt Real-time Vehicle Tracker</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+          integrity="sha256-Vz6HtRrC8XkGhlkZ6kPvxI6TkfQZvF59a+I1B9Jk0LM=" crossorigin="" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+            integrity="sha256-o9N1j7kP4G9TnppZArYdS9x+h0cYf9j/dVt0gYw0XDY=" crossorigin=""></script>
+    <link rel="stylesheet" href="styles.css" />
+</head>
+<body class="h-full font-[Inter]">
+    <div class="min-h-screen flex flex-col">
+        <header class="border-b border-slate-700 bg-slate-900/80 backdrop-blur px-6 py-4">
+            <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                <div>
+                    <h1 class="text-2xl font-semibold text-emerald-400">🚗 Bolt Real-time Tracker</h1>
+                    <p class="text-sm text-slate-300">ติดตามตำแหน่งรถ Bolt ในเชียงใหม่แบบสด</p>
+                </div>
+                <div class="flex items-center gap-4 text-sm" id="status-bar">
+                    <div class="flex items-center gap-2">
+                        <span class="h-2 w-2 rounded-full bg-red-400" id="connection-indicator"></span>
+                        <span id="connection-status">Disconnected</span>
+                    </div>
+                    <div class="text-slate-400" id="last-update">Last update: --</div>
+                    <div class="text-slate-400" id="total-vehicles">0 Vehicles</div>
+                </div>
+            </div>
+        </header>
+
+        <main class="flex-1 grid grid-cols-1 lg:grid-cols-[360px_minmax(0,1fr)]">
+            <aside class="bg-slate-900/60 border-r border-slate-800 p-6 space-y-6 overflow-y-auto">
+                <section>
+                    <h2 class="text-lg font-semibold text-slate-100 mb-4">Pickup Location</h2>
+                    <form id="location-form" class="space-y-4">
+                        <div>
+                            <label class="block text-sm text-slate-300 mb-1" for="latitude">Latitude</label>
+                            <input type="number" step="any" id="latitude" name="lat" value="18.756651"
+                                   class="w-full rounded-lg border border-slate-700 bg-slate-800/80 px-3 py-2 text-slate-100 focus:border-emerald-400 focus:outline-none">
+                        </div>
+                        <div>
+                            <label class="block text-sm text-slate-300 mb-1" for="longitude">Longitude</label>
+                            <input type="number" step="any" id="longitude" name="lng" value="98.994667"
+                                   class="w-full rounded-lg border border-slate-700 bg-slate-800/80 px-3 py-2 text-slate-100 focus:border-emerald-400 focus:outline-none">
+                        </div>
+                        <div>
+                            <label class="block text-sm text-slate-300 mb-1" for="address">Address</label>
+                            <input type="text" id="address" name="address" value="135 ซอย หมู่บ้านในฝัน"
+                                   class="w-full rounded-lg border border-slate-700 bg-slate-800/80 px-3 py-2 text-slate-100 focus:border-emerald-400 focus:outline-none">
+                        </div>
+                        <button type="submit"
+                                class="w-full rounded-lg bg-emerald-400 px-3 py-2 text-slate-900 font-semibold hover:bg-emerald-300 transition">
+                            Update Location
+                        </button>
+                    </form>
+                </section>
+
+                <section>
+                    <div class="flex items-center justify-between mb-3">
+                        <h2 class="text-lg font-semibold text-slate-100">Vehicle Categories</h2>
+                        <button id="clear-filter" class="text-xs text-emerald-400 hover:text-emerald-300">Show All</button>
+                    </div>
+                    <div id="category-list" class="space-y-3"></div>
+                </section>
+
+                <section>
+                    <h2 class="text-lg font-semibold text-slate-100 mb-4">Statistics</h2>
+                    <div class="grid gap-3" id="stats-grid"></div>
+                </section>
+            </aside>
+
+            <section class="relative bg-slate-950">
+                <div id="map" class="absolute inset-0"></div>
+                <div class="absolute bottom-4 left-1/2 -translate-x-1/2 rounded-full bg-slate-900/80 px-4 py-2 text-sm text-slate-100 shadow-lg border border-slate-700">
+                    Auto refresh every 2 seconds
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script type="module" src="script.js"></script>
+</body>
+</html>

@@ -1,0 +1,65 @@
+:root {
+    color-scheme: dark;
+}
+
+html, body {
+    height: 100%;
+}
+
+#map {
+    min-height: 500px;
+}
+
+.leaflet-control-attribution,
+.leaflet-control-zoom {
+    filter: invert(1) hue-rotate(180deg);
+}
+
+.category-card {
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.category-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 10px 30px -12px rgba(52, 211, 153, 0.6);
+}
+
+.marker-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1rem;
+    font-weight: 700;
+    color: #0f172a;
+    background: radial-gradient(circle at top, #f8fafc, var(--marker-color));
+    border-radius: 999px;
+    border: 2px solid rgba(15, 23, 42, 0.45);
+    width: 36px;
+    height: 36px;
+}
+
+.marker-icon::after {
+    content: "";
+    position: absolute;
+    bottom: -6px;
+    width: 0;
+    height: 0;
+    border-left: 6px solid transparent;
+    border-right: 6px solid transparent;
+    border-top: 8px solid var(--marker-color);
+}
+
+.popup-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+}
+
+.popup-table td {
+    padding: 2px 0;
+}
+
+.popup-table td:first-child {
+    color: #94a3b8;
+    padding-right: 0.5rem;
+}
