@@ -15,7 +15,13 @@ def create_app() -> Flask:
     app = Flask(__name__, static_folder="../static", static_url_path="")
     CORS(app)
 
-    bolt_token = os.environ.get("BOLT_AUTH_TOKEN")
+    bolt_token = os.environ.get(
+        "BOLT_TOKEN",
+        os.environ.get(
+            "BOLT_AUTH_TOKEN",
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJkYXRhIjp7InVzZXJfaWQiOjI4MzYxNzQ5NSwidXNlcl9sb2dpbl9pZCI6NjAzNzMzNTg3fSwiaWF0IjoxNzU5NTEwNTg3LCJleHAiOjE3NTk1MTQxODd9.TuM29RFnJGWxmrpwPQVKaO_gu1t9bS6mNBv_Q9zK0-U",
+        ),
+    )
 
     @dataclass
     class Vehicle:
@@ -61,14 +67,33 @@ def create_app() -> Flask:
         params = {
             "version": "CA.180.0",
             "deviceId": "ffac2e78-84c8-403d-b34e-8394499d7c29",
-            "locale": "en-TH",
-            "gps_lat": str(lat),
-            "gps_lng": str(lng),
+            "device_name": "XiaomiMi 11 Lite 4G",
+            "device_os_version": "12",
+            "channel": "googleplay",
+            "brand": "bolt",
+            "deviceType": "android",
+            "signup_session_id": "",
+            "country": "th",
+            "is_local_authentication_available": "false",
+            "language": "th",
+            "gps_lat": f"{lat:.6f}",
+            "gps_lng": f"{lng:.6f}",
+            "gps_accuracy_m": "10.0",
+            "gps_age": "0",
+            "user_id": "283617495",
+            "session_id": "283617495u1759509459582",
+            "distinct_id": "client-283617495",
+            "rh_session_id": "283617495u1759509267",
         }
         headers = {
+            "Host": "user.live.boltsvc.net",
             "Authorization": f"Bearer {bolt_token}",
-            "Content-Type": "application/json",
+            "Content-Type": "application/json; charset=UTF-8",
+            "Accept-Encoding": "gzip, deflate, br",
+            "User-Agent": "okhttp/4.12.0",
         }
+        viewport_padding_lat = 0.02070900924817
+        viewport_padding_lng = 0.02647531139420637
         body = {
             "destination_stops": [],
             "payment_method": {"id": "cash", "type": "default"},
@@ -80,8 +105,14 @@ def create_app() -> Flask:
             },
             "stage": "overview",
             "viewport": {
-                "north_east": {"lat": lat + 0.02, "lng": lng + 0.02},
-                "south_west": {"lat": lat - 0.02, "lng": lng - 0.02},
+                "north_east": {
+                    "lat": lat + viewport_padding_lat,
+                    "lng": lng + viewport_padding_lng,
+                },
+                "south_west": {
+                    "lat": lat - viewport_padding_lat,
+                    "lng": lng - viewport_padding_lng,
+                },
             },
         }
         response = requests.post(base_url, params=params, headers=headers, json=body, timeout=6)
