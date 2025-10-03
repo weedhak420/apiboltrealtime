@@ -40,14 +40,44 @@ def create_app() -> Flask:
         "13595": {"name": "Motorbike", "color": "#FBBF24", "emoji": "🟡"},
         "13596": {"name": "City Ride", "color": "#F97316", "emoji": "🟠"},
     }
+    CATEGORY_TARGET_COUNTS = {
+        "13591": 15,
+        "13592": 5,
+        "13593": 14,
+        "13595": 3,
+        "13596": 11,
+    }
 
-    FALLBACK_VEHICLES: List[Vehicle] = [
-        Vehicle("1660285396", 18.772542, 98.979779, 278.77, "13591", "Send Motorbike", None),
-        Vehicle("1660285397", 18.768400, 98.982120, 102.10, "13593", "Bolt", None),
-        Vehicle("1660285398", 18.761230, 98.995430, 45.00, "13596", "City Ride", None),
-        Vehicle("1660285399", 18.749310, 98.986540, 310.20, "13592", "XL", None),
-        Vehicle("1660285400", 18.755120, 98.999900, 210.40, "13595", "Motorbike", None),
-    ]
+    def build_fallback_vehicles(
+        origin_lat: float = 18.756651,
+        origin_lng: float = 98.994667,
+    ) -> List[Vehicle]:
+        vehicles: List[Vehicle] = []
+        radius_step_km = 0.6
+        angle_increment = 360 / sum(CATEGORY_TARGET_COUNTS.values())
+        angle = 0.0
+
+        for category_id, total in CATEGORY_TARGET_COUNTS.items():
+            config = CATEGORY_CONFIG.get(category_id, {})
+            for idx in range(total):
+                # Spread fallback vehicles radially around the pickup point.
+                radius_km = radius_step_km * (1 + (idx % 3) * 0.35)
+                angle_rad = math.radians(angle)
+                d_lat = (radius_km / 111) * math.cos(angle_rad)
+                d_lng = (radius_km / (111 * math.cos(math.radians(origin_lat)))) * math.sin(angle_rad)
+                vehicles.append(
+                    Vehicle(
+                        id=f"{category_id}-{idx+1:03d}",
+                        lat=origin_lat + d_lat,
+                        lng=origin_lng + d_lng,
+                        bearing=(angle % 360),
+                        category_id=category_id,
+                        category_name=config.get("name", "Unknown"),
+                        icon_url=None,
+                    )
+                )
+                angle += angle_increment
+        return vehicles
 
     def haversine_distance(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
         radius_km = 6371
@@ -156,13 +186,16 @@ def create_app() -> Flask:
         address = body.get("address", "135 ซอย หมู่บ้านในฝัน")
         place_id = body.get("place_id", "google|ChIJwSgfJj4w2jAR_72NE5V00bA")
 
+        used_live_data = True
         try:
             vehicles = fetch_from_bolt(lat, lng, address, place_id)
         except Exception:
+            used_live_data = False
             vehicles = []
 
         if not vehicles:
-            vehicles = FALLBACK_VEHICLES
+            used_live_data = False
+            vehicles = build_fallback_vehicles(lat, lng)
 
         enriched: List[Dict[str, Any]] = []
         category_counts: Dict[str, int] = {}
@@ -203,7 +236,9 @@ def create_app() -> Flask:
                 "total": len(enriched),
                 "nearest": nearest_vehicle,
                 "last_update": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "connection": "connected" if used_live_data else "offline",
             },
+            "poll_interval_sec": 2,
         }
         return jsonify(response_payload)
 

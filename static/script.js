@@ -5,14 +5,13 @@ const CATEGORY_CONFIG = {
   "13595": { name: "Motorbike", color: "#FBBF24", emoji: "🟡" },
   "13596": { name: "City Ride", color: "#F97316", emoji: "🟠" },
 };
-
-const OFFLINE_VEHICLES = [
-  { id: "1660285396", lat: 18.772542, lng: 98.979779, bearing: 278.77, category_id: "13591" },
-  { id: "1660285397", lat: 18.7684, lng: 98.98212, bearing: 102.1, category_id: "13593" },
-  { id: "1660285398", lat: 18.76123, lng: 98.99543, bearing: 45, category_id: "13596" },
-  { id: "1660285399", lat: 18.74931, lng: 98.98654, bearing: 310.2, category_id: "13592" },
-  { id: "1660285400", lat: 18.75512, lng: 98.9999, bearing: 210.4, category_id: "13595" },
-];
+const CATEGORY_TARGET_COUNTS = {
+  "13591": 15,
+  "13592": 5,
+  "13593": 14,
+  "13595": 3,
+  "13596": 11,
+};
 
 const map = L.map("map", {
   zoomControl: true,
@@ -28,6 +27,7 @@ let pickupMarker = null;
 let markersLayer = L.layerGroup().addTo(map);
 let activeCategory = null;
 let pollingTimer = null;
+let pollIntervalMs = 2000;
 let latestData = null;
 let latestPickup = { lat: 18.756651, lng: 98.994667, address: "135 ซอย หมู่บ้านในฝัน" };
 
@@ -39,6 +39,7 @@ const connectionIndicator = document.getElementById("connection-indicator");
 const connectionStatus = document.getElementById("connection-status");
 const lastUpdate = document.getElementById("last-update");
 const totalVehicles = document.getElementById("total-vehicles");
+const pollIntervalDisplay = document.getElementById("poll-interval");
 
 function rotateIcon(bearing) {
   return `transform: rotate(${bearing}deg);`;
@@ -58,17 +59,41 @@ function calculateDistance(lat1, lon1, lat2, lon2) {
 }
 
 function buildOfflineData(pickup) {
-  const vehicles = OFFLINE_VEHICLES.map((vehicle) => {
-    const config = CATEGORY_CONFIG[vehicle.category_id] || {};
-    const distance_km = calculateDistance(pickup.lat, pickup.lng, vehicle.lat, vehicle.lng);
-    return {
-      ...vehicle,
-      category_name: config.name || "Unknown",
-      color: config.color || "#F1F5F9",
-      emoji: config.emoji || "🚗",
-      icon_url: null,
-      distance_km,
-    };
+  const vehicles = [];
+  const totalVehiclesCount = Object.values(CATEGORY_TARGET_COUNTS).reduce(
+    (sum, count) => sum + count,
+    0,
+  );
+  const angleIncrement = 360 / totalVehiclesCount;
+  const baseRadiusKm = 0.6;
+  let angle = 0;
+
+  Object.entries(CATEGORY_TARGET_COUNTS).forEach(([categoryId, count]) => {
+    const config = CATEGORY_CONFIG[categoryId] || {};
+    for (let idx = 0; idx < count; idx += 1) {
+      const radiusKm = baseRadiusKm * (1 + (idx % 3) * 0.35);
+      const angleRad = (angle * Math.PI) / 180;
+      const dLat = (radiusKm / 111) * Math.cos(angleRad);
+      const dLng = (radiusKm / (111 * Math.cos((pickup.lat * Math.PI) / 180))) * Math.sin(angleRad);
+      const lat = pickup.lat + dLat;
+      const lng = pickup.lng + dLng;
+      const distance_km = calculateDistance(pickup.lat, pickup.lng, lat, lng);
+
+      vehicles.push({
+        id: `${categoryId}-${idx + 1}`,
+        lat,
+        lng,
+        bearing: angle % 360,
+        category_id: categoryId,
+        category_name: config.name || "Unknown",
+        color: config.color || "#F1F5F9",
+        emoji: config.emoji || "🚗",
+        icon_url: null,
+        distance_km,
+      });
+
+      angle += angleIncrement;
+    }
   });
 
   const categories = Object.entries(CATEGORY_CONFIG).map(([id, config]) => ({
@@ -76,7 +101,7 @@ function buildOfflineData(pickup) {
     name: config.name,
     color: config.color,
     emoji: config.emoji,
-    count: vehicles.filter((vehicle) => vehicle.category_id === id).length,
+    count: CATEGORY_TARGET_COUNTS[id] || 0,
   }));
 
   const nearest = vehicles.reduce((closest, vehicle) => {
@@ -93,7 +118,9 @@ function buildOfflineData(pickup) {
       total: vehicles.length,
       nearest,
       last_update: new Date().toISOString().replace("T", " ").slice(0, 19),
+      connection: "offline",
     },
+    poll_interval_sec: pollIntervalMs / 1000,
   };
 }
 
@@ -116,12 +143,16 @@ function createVehicleIcon(vehicle) {
   const { color, emoji } = vehicle;
   const rotationStyle = rotateIcon(vehicle.bearing || 0);
   const inverseRotation = -(vehicle.bearing || 0);
+  const iconContent = vehicle.icon_url
+    ? `<img src="${vehicle.icon_url}" alt="${vehicle.category_name}" style="transform: rotate(${inverseRotation}deg);" />`
+    : `<span style="display:inline-block; transform: rotate(${inverseRotation}deg);">${emoji}</span>`;
+
   return L.divIcon({
     className: "",
     html: `
       <div class="relative flex flex-col items-center">
         <div class="marker-icon" style="--marker-color:${color}; ${rotationStyle}">
-          <span style="display:inline-block; transform: rotate(${inverseRotation}deg);">${emoji}</span>
+          ${iconContent}
         </div>
       </div>
     `,
@@ -141,7 +172,10 @@ function renderMarkers(vehicles, pickup) {
         icon: createVehicleIcon(vehicle),
       });
 
-      const distance = calculateDistance(pickup.lat, pickup.lng, vehicle.lat, vehicle.lng);
+      const distance =
+        typeof vehicle.distance_km === "number"
+          ? vehicle.distance_km
+          : calculateDistance(pickup.lat, pickup.lng, vehicle.lat, vehicle.lng);
       const popupHtml = `
         <div class="space-y-2">
           <div class="flex items-center gap-2 text-sm font-semibold">
@@ -202,12 +236,23 @@ function renderCategories(categories) {
 }
 
 function renderStats(data) {
-  const { total, nearest } = data.stats;
+  const { total, nearest, connection, last_update } = data.stats;
   totalVehicles.textContent = `${total} Vehicles`;
+  if (last_update) {
+    lastUpdate.textContent = `Last update: ${last_update}`;
+  }
   const statsItems = [
     {
       label: "Total Vehicles",
       value: total,
+    },
+    {
+      label: "Connection Status",
+      value: connection ? connection.charAt(0).toUpperCase() + connection.slice(1) : "--",
+    },
+    {
+      label: "Last Update",
+      value: last_update || "--",
     },
     ...data.categories.map((category) => ({
       label: category.name,
@@ -256,9 +301,16 @@ async function fetchVehicles(payload) {
     }
 
     const data = await response.json();
-    connectionIndicator.classList.replace("bg-amber-400", "bg-emerald-400");
-    connectionStatus.textContent = "Connected";
+    const isConnected = data.stats.connection === "connected";
+    connectionIndicator.classList.remove("bg-red-400", "bg-amber-400", "bg-emerald-400");
+    connectionIndicator.classList.add(isConnected ? "bg-emerald-400" : "bg-red-400");
+    connectionStatus.textContent = isConnected ? "Connected" : "Offline data";
     lastUpdate.textContent = `Last update: ${data.stats.last_update}`;
+    if (typeof data.poll_interval_sec === "number") {
+      pollIntervalMs = data.poll_interval_sec * 1000;
+      pollIntervalDisplay.textContent = data.poll_interval_sec;
+      startPolling();
+    }
     return data;
   } catch (error) {
     console.error(error);
@@ -282,18 +334,18 @@ async function refreshVehicles() {
     const data = await fetchVehicles(pickup);
     latestData = data;
     latestPickup = pickup;
-    renderCategories(data.categories);
-    renderStats(data);
-    renderMarkers(data.vehicles, pickup);
   } catch (error) {
-    if (!latestData) {
-      latestData = buildOfflineData(pickup);
-      latestPickup = pickup;
-    }
-    renderCategories(latestData.categories);
-    renderStats(latestData);
-    renderMarkers(latestData.vehicles, latestPickup);
+    latestData = buildOfflineData(pickup);
+    latestPickup = pickup;
+    connectionIndicator.classList.remove("bg-emerald-400", "bg-amber-400");
+    connectionIndicator.classList.add("bg-red-400");
+    connectionStatus.textContent = "Offline data";
+    pollIntervalDisplay.textContent = pollIntervalMs / 1000;
   }
+
+  renderCategories(latestData.categories);
+  renderStats(latestData);
+  renderMarkers(latestData.vehicles, latestPickup);
 }
 
 function startPolling() {
@@ -302,7 +354,7 @@ function startPolling() {
   }
   pollingTimer = setInterval(() => {
     refreshVehicles();
-  }, 2000);
+  }, pollIntervalMs);
 }
 
 locationForm.addEventListener("submit", (event) => {

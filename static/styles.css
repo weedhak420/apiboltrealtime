@@ -36,6 +36,8 @@ html, body {
     border: 2px solid rgba(15, 23, 42, 0.45);
     width: 36px;
     height: 36px;
+    position: relative;
+    overflow: hidden;
 }
 
 .marker-icon::after {
@@ -47,6 +49,12 @@ html, body {
     border-left: 6px solid transparent;
     border-right: 6px solid transparent;
     border-top: 8px solid var(--marker-color);
+}
+
+.marker-icon img {
+    width: 20px;
+    height: 20px;
+    object-fit: contain;
 }
 
 .popup-table {
