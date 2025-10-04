@@ -48,7 +48,7 @@
         #header-content {
             display: flex;
             justify-content: space-between;
-            align-items: center;
+            align-items: flex-start;
             flex-wrap: wrap;
             gap: 20px;
         }
@@ -67,10 +67,56 @@
             -webkit-text-fill-color: transparent;
         }
 
+        #header-controls {
+            display: flex;
+            gap: 30px;
+            flex-wrap: wrap;
+            align-items: flex-start;
+        }
+
         #stats-panel {
             display: flex;
             gap: 30px;
             flex-wrap: wrap;
+        }
+
+        #filters-panel {
+            display: flex;
+            gap: 16px;
+            align-items: flex-end;
+            flex-wrap: wrap;
+        }
+
+        .filter-group {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .filter-group label {
+            font-size: 11px;
+            color: #64748b;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .filter-group select {
+            min-width: 180px;
+            padding: 8px 12px;
+            border-radius: 10px;
+            border: 1px solid #e2e8f0;
+            background: white;
+            font-weight: 600;
+            color: #334155;
+            box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.08);
+            transition: border-color 0.2s ease, box-shadow 0.2s ease;
+        }
+
+        .filter-group select:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.2);
         }
 
         .stat-item {
@@ -243,9 +289,19 @@
                 flex-direction: column;
             }
 
+            #header-controls {
+                width: 100%;
+                flex-direction: column;
+                gap: 16px;
+            }
+
             #stats-panel {
                 width: 100%;
                 justify-content: space-around;
+            }
+
+            #filters-panel {
+                width: 100%;
             }
 
             .stat-value {
@@ -265,33 +321,51 @@
                     </svg>
                     <h1>🚕 ระบบติดตามรถแท็กซี่</h1>
                 </div>
-                
-                <div id="stats-panel">
-                    <div class="stat-item">
-                        <span class="stat-label">รถทั้งหมด</span>
-                        <span class="stat-value highlight" id="vehicle-count">0</span>
+
+                <div id="header-controls">
+                    <div id="stats-panel">
+                        <div class="stat-item">
+                            <span class="stat-label">รถทั้งหมด</span>
+                            <span class="stat-value highlight" id="vehicle-count">0</span>
+                            <span class="stat-subtext" id="vehicle-count-subtext">visible / total</span>
+                        </div>
+
+                        <div class="stat-item">
+                            <span class="stat-label">พื้นที่ครอบคลุม</span>
+                            <span class="stat-value" id="location-count">0</span>
+                            <span class="stat-subtext">locations</span>
+                        </div>
+
+                        <div class="stat-item">
+                            <span class="stat-label">ความเร็ว</span>
+                            <span class="stat-value" id="fetch-time">-</span>
+                            <span class="stat-subtext">seconds</span>
+                        </div>
+
+                        <div class="stat-item">
+                            <span class="stat-label">อัปเดตล่าสุด</span>
+                            <span class="stat-value" style="font-size: 16px;" id="last-update">-</span>
+                        </div>
+
+                        <div id="connection-status" class="disconnected">
+                            <span class="status-dot disconnected"></span>
+                            <span id="connection-text">กำลังเชื่อมต่อ...</span>
+                        </div>
                     </div>
-                    
-                    <div class="stat-item">
-                        <span class="stat-label">พื้นที่ครอบคลุม</span>
-                        <span class="stat-value" id="location-count">0</span>
-                        <span class="stat-subtext">locations</span>
-                    </div>
-                    
-                    <div class="stat-item">
-                        <span class="stat-label">ความเร็ว</span>
-                        <span class="stat-value" id="fetch-time">-</span>
-                        <span class="stat-subtext">seconds</span>
-                    </div>
-                    
-                    <div class="stat-item">
-                        <span class="stat-label">อัปเดตล่าสุด</span>
-                        <span class="stat-value" style="font-size: 16px;" id="last-update">-</span>
-                    </div>
-                    
-                    <div id="connection-status" class="disconnected">
-                        <span class="status-dot disconnected"></span>
-                        <span id="connection-text">กำลังเชื่อมต่อ...</span>
+
+                    <div id="filters-panel">
+                        <div class="filter-group">
+                            <label for="district-filter">อำเภอ</label>
+                            <select id="district-filter">
+                                <option value="all">ทุกอำเภอ</option>
+                            </select>
+                        </div>
+                        <div class="filter-group">
+                            <label for="type-filter">ประเภทพื้นที่</label>
+                            <select id="type-filter">
+                                <option value="all">ทุกประเภท</option>
+                            </select>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -310,18 +384,34 @@
 
     <script>
         // Configuration
-        const MAP_CENTER = [18.7883, 98.9853];
-        const MAP_ZOOM = 12;
+        const FALLBACK_MAP_CENTER = [18.7883, 98.9853];
+        const FALLBACK_MAP_ZOOM = 12;
 
         let debugVisible = false;
         let debugLogs = [];
         let markers = {};
+        let latestVehicles = [];
+        let locationMetadata = [];
+        let selectedDistrict = 'all';
+        let selectedLocationType = 'all';
+        let lastLocationsCount = 0;
+        let lastFetchTime = 0;
+        let lastTotalVehicleCount = 0;
+        let mapConfigured = false;
+        let mapSettings = {
+            center: { lat: FALLBACK_MAP_CENTER[0], lng: FALLBACK_MAP_CENTER[1] },
+            zoom: FALLBACK_MAP_ZOOM,
+        };
+        let filtersInitialized = false;
+
+        const districtFilter = document.getElementById('district-filter');
+        const typeFilter = document.getElementById('type-filter');
 
         function toggleDebug() {
             debugVisible = !debugVisible;
             const panel = document.getElementById('debug-panel');
             const button = document.getElementById('debug-toggle');
-            
+
             if (debugVisible) {
                 panel.classList.remove('debug-hidden');
                 button.textContent = '❌ ซ่อน';
@@ -334,33 +424,187 @@
         function addDebugLog(message, data = null) {
             const timestamp = new Date().toLocaleTimeString('th-TH');
             const logEntry = `[${timestamp}] ${message}`;
-            
+
             console.log('[Bolt]', message, data || '');
-            
+
             debugLogs.unshift(logEntry);
             if (data) {
                 debugLogs.unshift(JSON.stringify(data, null, 2));
             }
-            
+
             if (debugLogs.length > 50) {
                 debugLogs = debugLogs.slice(0, 50);
             }
-            
+
             const debugContent = document.getElementById('debug-content');
             if (debugContent) {
                 debugContent.innerHTML = '<pre>' + debugLogs.join('\n') + '</pre>';
             }
         }
 
+        function formatLocationLabel(location) {
+            if (!location) {
+                return 'N/A';
+            }
+
+            const name = location.name || {};
+            const isNameObject = typeof name === 'object' && name !== null;
+            const nameTh = isNameObject ? name.th : undefined;
+            const nameEn = isNameObject ? name.en : undefined;
+            const labelParts = [];
+            if (nameTh) {
+                labelParts.push(nameTh);
+            }
+            if (nameEn && nameEn !== nameTh) {
+                labelParts.push(nameEn);
+            }
+            if (!labelParts.length && typeof name === 'string') {
+                labelParts.push(name);
+            }
+            if (!labelParts.length && location.id) {
+                labelParts.push(location.id);
+            }
+            const districtText = location.district ? ` • ${location.district}` : '';
+            return `${labelParts.join(' / ') || 'Unknown'}${districtText}`;
+        }
+
+        function applyMapSettings(settings, options = {}) {
+            if (!settings || !settings.center) {
+                return;
+            }
+
+            const { force = false } = options;
+            const lat = Number(settings.center.lat);
+            const lng = Number(settings.center.lng);
+            const zoom = Number(settings.zoom);
+
+            if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+                return;
+            }
+
+            if (!mapConfigured || force) {
+                map.setView([lat, lng], Number.isFinite(zoom) ? zoom : map.getZoom());
+                mapConfigured = true;
+            }
+        }
+
+        function populateDistrictFilter(districts) {
+            if (!districtFilter || !Array.isArray(districts)) {
+                return;
+            }
+
+            const previousValue = districtFilter.value || selectedDistrict;
+            districtFilter.innerHTML = '<option value="all">ทุกอำเภอ</option>';
+            districts.forEach((district) => {
+                const option = document.createElement('option');
+                option.value = district;
+                option.textContent = district;
+                districtFilter.appendChild(option);
+            });
+            const newValue = districts.includes(previousValue) ? previousValue : 'all';
+            districtFilter.value = newValue;
+            selectedDistrict = newValue;
+        }
+
+        function populateTypeFilter(types) {
+            if (!typeFilter || !Array.isArray(types)) {
+                return;
+            }
+
+            const previousValue = typeFilter.value || selectedLocationType;
+            typeFilter.innerHTML = '<option value="all">ทุกประเภท</option>';
+            types.forEach((type) => {
+                const option = document.createElement('option');
+                option.value = type;
+                option.textContent = type.charAt(0).toUpperCase() + type.slice(1);
+                typeFilter.appendChild(option);
+            });
+            const newValue = types.includes(previousValue) ? previousValue : 'all';
+            typeFilter.value = newValue;
+            selectedLocationType = newValue;
+        }
+
+        function applyFilters(vehicles) {
+            return vehicles.filter((vehicle) => {
+                const location = vehicle.source_location || {};
+                const districtMatch = selectedDistrict === 'all' || location.district === selectedDistrict;
+                const typeMatch = selectedLocationType === 'all' || location.type === selectedLocationType;
+                return districtMatch && typeMatch;
+            });
+        }
+
+        function handleFilterChange(kind, value) {
+            if (kind === 'district') {
+                selectedDistrict = value;
+            } else if (kind === 'type') {
+                selectedLocationType = value;
+            }
+
+            const label = kind === 'district' ? 'อำเภอ' : 'ประเภทพื้นที่';
+            addDebugLog(`🎛️ ${label} filter: ${value === 'all' ? 'ทั้งหมด' : value}`);
+
+            const filteredVehicles = applyFilters(latestVehicles);
+            updateVehicles(filteredVehicles);
+            updateStats(filteredVehicles.length, lastLocationsCount, lastFetchTime, lastTotalVehicleCount);
+        }
+
         // Initialize map
         addDebugLog('🗺️ Initializing map...');
-        const map = L.map('map').setView(MAP_CENTER, MAP_ZOOM);
-        
+        const map = L.map('map').setView(FALLBACK_MAP_CENTER, FALLBACK_MAP_ZOOM);
+
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
             attribution: '© OpenStreetMap contributors',
             maxZoom: 19
         }).addTo(map);
         addDebugLog('✅ Map initialized');
+
+        async function loadLocationMetadata() {
+            try {
+                const response = await fetch('/locations');
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                const data = await response.json();
+                locationMetadata = data.locations || [];
+                if (data.map_settings) {
+                    mapSettings = data.map_settings;
+                    applyMapSettings(mapSettings, { force: true });
+                }
+                if (Array.isArray(data.districts)) {
+                    populateDistrictFilter(data.districts);
+                }
+                if (Array.isArray(data.types)) {
+                    populateTypeFilter(data.types);
+                }
+                if (districtFilter) {
+                    selectedDistrict = districtFilter.value;
+                }
+                if (typeFilter) {
+                    selectedLocationType = typeFilter.value;
+                }
+                filtersInitialized = true;
+                addDebugLog('🗂️ Loaded location metadata', {
+                    districts: Array.isArray(data.districts) ? data.districts.length : 0,
+                    types: Array.isArray(data.types) ? data.types.length : 0,
+                });
+            } catch (error) {
+                addDebugLog('❌ Failed to load location metadata: ' + error.message);
+            }
+        }
+
+        loadLocationMetadata();
+
+        if (districtFilter) {
+            districtFilter.addEventListener('change', (event) => {
+                handleFilterChange('district', event.target.value);
+            });
+        }
+
+        if (typeFilter) {
+            typeFilter.addEventListener('change', (event) => {
+                handleFilterChange('type', event.target.value);
+            });
+        }
 
         // Socket.IO connection
         addDebugLog('🔌 Connecting to Socket.IO...');
@@ -388,20 +632,53 @@
 
         socket.on('vehicles_update', (data) => {
             addDebugLog('📡 Received vehicles update');
-            
-            const vehicles = data.vehicles || [];
-            const count = data.count || vehicles.length;
-            const locationsCount = data.locations_count || 0;
-            const fetchTime = data.fetch_time || 0;
-            
-            addDebugLog(`📊 Stats: ${count} vehicles, ${locationsCount} locations, ${fetchTime.toFixed(2)}s`);
-            
-            if (vehicles.length > 0) {
-                addDebugLog('🚗 First vehicle sample:', vehicles[0]);
+
+            if (Array.isArray(data.location_metadata) && data.location_metadata.length > 0) {
+                locationMetadata = data.location_metadata;
             }
-            
-            updateVehicles(vehicles);
-            updateStats(count, locationsCount, fetchTime);
+
+            if (data.config) {
+                if (data.config.map) {
+                    mapSettings = data.config.map;
+                    applyMapSettings(mapSettings);
+                }
+                if (!filtersInitialized) {
+                    if (Array.isArray(data.config.districts)) {
+                        populateDistrictFilter(data.config.districts);
+                    }
+                    if (Array.isArray(data.config.types)) {
+                        populateTypeFilter(data.config.types);
+                    }
+                    if (districtFilter) {
+                        selectedDistrict = districtFilter.value;
+                    }
+                    if (typeFilter) {
+                        selectedLocationType = typeFilter.value;
+                    }
+                    filtersInitialized = true;
+                }
+            }
+
+            const vehicles = Array.isArray(data.vehicles) ? data.vehicles : [];
+            latestVehicles = vehicles;
+            lastTotalVehicleCount = vehicles.length;
+            lastLocationsCount = data.locations_count || (Array.isArray(locationMetadata) ? locationMetadata.length : 0);
+            const fetchTime = typeof data.fetch_time === 'number' ? data.fetch_time : parseFloat(data.fetch_time) || 0;
+            lastFetchTime = fetchTime;
+
+            const filteredVehicles = applyFilters(latestVehicles);
+            const filtersApplied = selectedDistrict !== 'all' || selectedLocationType !== 'all';
+            const filterSummary = filtersApplied ? ` (${filteredVehicles.length}/${vehicles.length} shown)` : '';
+            addDebugLog(`📊 Stats: ${vehicles.length} vehicles${filterSummary}, ${lastLocationsCount} locations, ${fetchTime.toFixed(2)}s`);
+
+            if (filteredVehicles.length > 0) {
+                addDebugLog('🚗 First vehicle sample:', filteredVehicles[0]);
+            }
+
+            updateVehicles(filteredVehicles);
+            updateStats(filteredVehicles.length, lastLocationsCount, fetchTime, vehicles.length);
+
+            lastUpdateTime = Date.now();
         });
 
         function updateConnectionStatus(connected) {
@@ -425,7 +702,7 @@
             let markersCreated = 0;
             let markersUpdated = 0;
 
-            vehicles.forEach(vehicle => {
+            vehicles.forEach((vehicle) => {
                 if (!vehicle.id || !vehicle.lat || !vehicle.lng) {
                     return;
                 }
@@ -433,20 +710,17 @@
                 currentIds.add(vehicle.id);
 
                 if (markers[vehicle.id]) {
-                    // Update existing marker
                     const marker = markers[vehicle.id];
                     const newLatLng = L.latLng(vehicle.lat, vehicle.lng);
-                    
                     marker.setLatLng(newLatLng);
-                    
+
                     if (vehicle.bearing !== undefined) {
                         marker.setRotationAngle(vehicle.bearing);
                     }
                     markersUpdated++;
                 } else {
-                    // Create new marker
                     const iconUrl = vehicle.icon_url || 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-blue.png';
-                    
+
                     const icon = L.icon({
                         iconUrl: iconUrl,
                         iconSize: [25, 41],
@@ -461,14 +735,13 @@
                         rotationOrigin: 'center center'
                     }).addTo(map);
 
-                    // Popup content
                     const popupContent = `
                         <div class="vehicle-popup">
                             <h3>🚕 ${vehicle.category_name || 'แท็กซี่'}</h3>
                             <p><strong>รหัส:</strong> ${vehicle.id}</p>
                             <p><strong>ตำแหน่ง:</strong> ${vehicle.lat.toFixed(6)}, ${vehicle.lng.toFixed(6)}</p>
                             <p><strong>ทิศทาง:</strong> ${vehicle.bearing || 0}°</p>
-                            <p><strong>พื้นที่:</strong> ${vehicle.source_location || 'N/A'}</p>
+                            <p><strong>พื้นที่:</strong> ${formatLocationLabel(vehicle.source_location)}</p>
                         </div>
                     `;
                     marker.bindPopup(popupContent);
@@ -478,9 +751,8 @@
                 }
             });
 
-            // Remove old markers
             let markersRemoved = 0;
-            Object.keys(markers).forEach(id => {
+            Object.keys(markers).forEach((id) => {
                 if (!currentIds.has(id)) {
                     map.removeLayer(markers[id]);
                     delete markers[id];
@@ -491,18 +763,37 @@
             addDebugLog(`🎯 Markers: +${markersCreated} new, ~${markersUpdated} updated, -${markersRemoved} removed. Total: ${Object.keys(markers).length}`);
         }
 
-        function updateStats(count, locationsCount, fetchTime) {
-            document.getElementById('vehicle-count').textContent = count;
-            document.getElementById('location-count').textContent = locationsCount;
-            document.getElementById('fetch-time').textContent = fetchTime.toFixed(2);
-            
+        function updateStats(displayCount, locationsCount, fetchTime, totalCount = displayCount) {
+            const vehicleCountEl = document.getElementById('vehicle-count');
+            const vehicleSubtextEl = document.getElementById('vehicle-count-subtext');
+            if (vehicleCountEl) {
+                vehicleCountEl.textContent = totalCount !== displayCount ? `${displayCount} / ${totalCount}` : `${displayCount}`;
+            }
+            if (vehicleSubtextEl) {
+                vehicleSubtextEl.textContent = totalCount !== displayCount ? 'visible / total' : 'visible';
+            }
+
+            const locationCountEl = document.getElementById('location-count');
+            if (locationCountEl) {
+                locationCountEl.textContent = locationsCount;
+            }
+
+            const fetchTimeEl = document.getElementById('fetch-time');
+            const fetchTimeValue = Number.isFinite(fetchTime) ? fetchTime : parseFloat(fetchTime) || 0;
+            if (fetchTimeEl) {
+                fetchTimeEl.textContent = fetchTimeValue.toFixed(2);
+            }
+
             const now = new Date();
-            const timeStr = now.toLocaleTimeString('th-TH', { 
-                hour: '2-digit', 
+            const timeStr = now.toLocaleTimeString('th-TH', {
+                hour: '2-digit',
                 minute: '2-digit',
                 second: '2-digit'
             });
-            document.getElementById('last-update').textContent = timeStr;
+            const lastUpdateEl = document.getElementById('last-update');
+            if (lastUpdateEl) {
+                lastUpdateEl.textContent = timeStr;
+            }
         }
 
         // Performance indicator
@@ -513,11 +804,6 @@
                 addDebugLog(`⚠️ No update for ${elapsed.toFixed(0)}s`);
             }
         }, 5000);
-
-        socket.on('vehicles_update', (data) => {
-            lastUpdateTime = Date.now();
-            // ... rest of handler
-        });
 
         addDebugLog('🚀 System ready, waiting for data...');
     </script>

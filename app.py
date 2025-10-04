@@ -3,9 +3,16 @@ from flask_socketio import SocketIO
 import requests
 import time
 import threading
-import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+
+from config import (
+    DISTRICTS,
+    LOCATION_TYPES,
+    LOCATIONS,
+    MAP_SETTINGS,
+    VIEWPORT_PADDING,
+)
 
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
@@ -24,26 +31,25 @@ MAX_WORKERS = 10
 FETCH_INTERVAL = 1  # ลดจาก 5 เหลือ 3 วินาที
 
 # ==========================================
-# 🗺️ MULTIPLE LOCATIONS - ครอบคลุม Chiang Mai
+# 🗺️ LOCATION HELPERS
 # ==========================================
 
-# กำหนดจุดต่างๆ รอบเชียงใหม่ เพื่อดึงข้อมูลจากหลายพื้นที่
-LOCATIONS = [
-    {"name": "City Center", "lat": 18.7883, "lng": 98.9853},
-    {"name": "Old City", "lat": 18.7912, "lng": 98.9853},
-    {"name": "Tha Phae Gate", "lat": 18.7868, "lng": 98.9931},
-    {"name": "Nimman", "lat": 18.8002, "lng": 98.9679},
-    {"name": "CMU Area", "lat": 18.8063, "lng": 98.9511},
-    {"name": "Maya Mall", "lat": 18.8025, "lng": 98.9667},
-    {"name": "Airport", "lat": 18.7667, "lng": 98.9625},
-    {"name": "San Kamphaeng", "lat": 18.7500, "lng": 99.1167},
-    {"name": "Hang Dong", "lat": 18.6833, "lng": 98.9167},
-    {"name": "Doi Saket", "lat": 18.9167, "lng": 99.1667},
-    {"name": "Mae Rim", "lat": 18.9167, "lng": 98.8833},
-    {"name": "Doi Suthep", "lat": 18.8047, "lng": 98.9217},
-    {"name": "San Sai", "lat": 18.8667, "lng": 99.0333},
-    {"name": "Saraphi", "lat": 18.7167, "lng": 99.0167},
-]
+
+def get_location_name(location, language="en"):
+    name = location.get("name", {})
+    if isinstance(name, dict):
+        return name.get(language) or name.get("en") or name.get("th") or location.get("id", "Unknown")
+    return name or location.get("id", "Unknown")
+
+
+def get_coordinates(location):
+    coordinates = location.get("coordinates", {})
+    return coordinates.get("lat"), coordinates.get("lng")
+
+
+def summarize_location(location):
+    summary_keys = ("id", "name", "district", "type", "priority", "coordinates")
+    return {key: location[key] for key in summary_keys if key in location}
 
 # ==========================================
 # 🚀 CONCURRENT API FETCHING
@@ -51,8 +57,12 @@ LOCATIONS = [
 
 def fetch_single_location(location):
     try:
-        lat = location["lat"]
-        lng = location["lng"]
+        lat, lng = get_coordinates(location)
+        if lat is None or lng is None:
+            raise ValueError("Missing coordinates for location")
+
+        location_name_en = get_location_name(location, "en")
+        location_summary = summarize_location(location)
         base_url = "https://user.live.boltsvc.net/mobility/search/poll"
 
         params = {
@@ -85,15 +95,15 @@ def fetch_single_location(location):
             "User-Agent": "okhttp/4.12.0"
         }
 
-        viewport_offset = 0.018
+        viewport_offset = VIEWPORT_PADDING
         body = {
             "destination_stops": [],
             "payment_method": {"id": "cash", "type": "default"},
             "pickup_stop": {
                 "lat": lat,
                 "lng": lng,
-                "address": location["name"],
-                "place_id": f"custom|{location['name']}"
+                "address": location_name_en,
+                "place_id": f"custom|{location_summary['id']}"
             },
             "stage": "overview",
             "viewport": {
@@ -105,11 +115,21 @@ def fetch_single_location(location):
         response = requests.post(base_url, params=params, headers=headers, json=body, timeout=5)
 
         if response.status_code == 200:
-            return {"location": location["name"], "data": response.json(), "success": True}
+            return {"location": location_summary, "data": response.json(), "success": True}
         else:
-            return {"location": location["name"], "data": None, "success": False, "error": f"Status {response.status_code}"}
+            return {
+                "location": location_summary,
+                "data": None,
+                "success": False,
+                "error": f"Status {response.status_code}",
+            }
     except Exception as e:
-        return {"location": location["name"], "data": None, "success": False, "error": str(e)}
+        return {
+            "location": summarize_location(location),
+            "data": None,
+            "success": False,
+            "error": str(e),
+        }
 
 def fetch_all_locations():
     all_responses = []
@@ -136,6 +156,8 @@ def process_all_responses(responses):
         if not data:
             continue
 
+        location_info = response.get("location", {})
+
         vehicles = data.get("data", {}).get("vehicles", {})
         taxi_vehicles = vehicles.get("taxi", {})
         icons = vehicles.get("icons", {}).get("taxi", {})
@@ -158,7 +180,7 @@ def process_all_responses(responses):
                     "icon_url": icon_url,
                     "category_name": categories.get(category_id, {}).get("name", "Unknown"),
                     "category_id": category_id,
-                    "source_location": response["location"]
+                    "source_location": location_info,
                 }
                 if vehicle_info["lat"] and vehicle_info["lng"]:
                     all_vehicles.append(vehicle_info)
@@ -175,19 +197,23 @@ def generate_fake_data_multi_location():
     import random
     all_vehicles = []
     for idx, location in enumerate(LOCATIONS):
+        lat, lng = get_coordinates(location)
+        if lat is None or lng is None:
+            continue
+        location_summary = summarize_location(location)
         num_cars = random.randint(5, 15)
         for i in range(num_cars):
             lat_offset = random.uniform(-0.015, 0.015)
             lng_offset = random.uniform(-0.015, 0.015)
             vehicle = {
                 "id": f"FAKE_{idx}_{i}",
-                "lat": location["lat"] + lat_offset,
-                "lng": location["lng"] + lng_offset,
+                "lat": lat + lat_offset,
+                "lng": lng + lng_offset,
                 "bearing": random.randint(0, 359),
                 "icon_url": "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-blue.png",
                 "category_name": random.choice(["Economy", "Comfort", "XL"]),
                 "category_id": "economy",
-                "source_location": location["name"]
+                "source_location": location_summary,
             }
             all_vehicles.append(vehicle)
     return all_vehicles
@@ -220,7 +246,13 @@ def data_fetch_loop():
                 "locations_count": len(LOCATIONS),
                 "success_locations": [r["location"] for r in responses if r.get("success")],
                 "failed_locations": [r["location"] for r in responses if not r.get("success")],
-                "fetch_time": elapsed
+                "fetch_time": elapsed,
+                "location_metadata": LOCATIONS,
+                "config": {
+                    "map": MAP_SETTINGS,
+                    "districts": DISTRICTS,
+                    "types": LOCATION_TYPES,
+                }
             })
 
             print(f"⏳ รอ {FETCH_INTERVAL} วินาที...")
@@ -251,14 +283,20 @@ def test_api():
             "vehicle_count": len(vehicles),
             "locations_count": len(LOCATIONS),
             "fetch_time": f"{elapsed:.2f}s",
-            "vehicles_sample": vehicles[:5]
+            "vehicles_sample": vehicles[:5],
+            "location_metadata": LOCATIONS,
+            "config": {
+                "map": MAP_SETTINGS,
+                "districts": DISTRICTS,
+                "types": LOCATION_TYPES,
+            }
         })
 
     responses = fetch_all_locations()
     vehicles = process_all_responses(responses)
     elapsed = time.time() - start_time
-    success_locations = [r["location"] for r in responses if r["success"]]
-    failed_locations = [r["location"] for r in responses if not r["success"]]
+    success_locations = [r["location"] for r in responses if r.get("success")]
+    failed_locations = [r["location"] for r in responses if not r.get("success")]
 
     return jsonify({
         "success": True,
@@ -268,14 +306,23 @@ def test_api():
         "fetch_time": f"{elapsed:.2f}s",
         "success_locations": success_locations,
         "failed_locations": failed_locations,
-        "vehicles_sample": vehicles[:5]
+        "vehicles_sample": vehicles[:5],
+        "location_metadata": LOCATIONS,
+        "config": {
+            "map": MAP_SETTINGS,
+            "districts": DISTRICTS,
+            "types": LOCATION_TYPES,
+        }
     })
 
 @app.route("/locations")
 def get_locations():
     return jsonify({
         "locations": LOCATIONS,
-        "count": len(LOCATIONS)
+        "count": len(LOCATIONS),
+        "districts": DISTRICTS,
+        "types": LOCATION_TYPES,
+        "map_settings": MAP_SETTINGS,
     })
 
 @socketio.on('connect')
