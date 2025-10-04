@@ -1,11 +1,78 @@
-from flask import Flask, render_template, jsonify
-from flask_socketio import SocketIO
-import requests
-import time
-import threading
+import os
 import json
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+
+import requests
+from flask import Flask, render_template, jsonify
+from flask_socketio import SocketIO
+
+
+def load_env_file(env_path: str = ".env") -> None:
+    """Load environment variables from a .env file if it exists."""
+
+    if not os.path.exists(env_path):
+        return
+
+    with open(env_path, "r", encoding="utf-8") as env_file:
+        for line in env_file:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if "=" not in stripped:
+                continue
+            key, value = stripped.split("=", 1)
+            os.environ.setdefault(key.strip(), value.strip())
+
+
+def load_config():
+    """Load required configuration from the environment."""
+
+    required_vars = [
+        "BOLT_BEARER_TOKEN",
+        "BOLT_DEVICE_ID",
+        "BOLT_DEVICE_NAME",
+        "BOLT_DEVICE_OS_VERSION",
+        "BOLT_USER_ID",
+        "BOLT_DISTINCT_ID",
+        "BOLT_RH_SESSION_ID",
+    ]
+
+    config = {}
+    missing = []
+
+    for var in required_vars:
+        value = os.getenv(var)
+        if value:
+            config[var] = value
+        else:
+            missing.append(var)
+
+    if missing:
+        missing_list = ", ".join(missing)
+        raise RuntimeError(
+            "Missing required environment variables: "
+            f"{missing_list}. Please define them before starting the app."
+        )
+
+    optional_defaults = {
+        "BOLT_CHANNEL": "googleplay",
+        "BOLT_BRAND": "bolt",
+        "BOLT_DEVICE_TYPE": "android",
+        "BOLT_COUNTRY": "th",
+        "BOLT_LANGUAGE": "th",
+    }
+
+    for var, default in optional_defaults.items():
+        config[var] = os.getenv(var, default)
+
+    return config
+
+
+load_env_file()
+CONFIG = load_config()
 
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
@@ -57,29 +124,29 @@ def fetch_single_location(location):
 
         params = {
             "version": "CA.180.0",
-            "deviceId": "ffac2e78-84c8-403d-b34e-8394499d7c29",
-            "device_name": "XiaomiMi 11 Lite 4G",
-            "device_os_version": "12",
-            "channel": "googleplay",
-            "brand": "bolt",
-            "deviceType": "android",
+            "deviceId": CONFIG["BOLT_DEVICE_ID"],
+            "device_name": CONFIG["BOLT_DEVICE_NAME"],
+            "device_os_version": CONFIG["BOLT_DEVICE_OS_VERSION"],
+            "channel": CONFIG["BOLT_CHANNEL"],
+            "brand": CONFIG["BOLT_BRAND"],
+            "deviceType": CONFIG["BOLT_DEVICE_TYPE"],
             "signup_session_id": "",
-            "country": "th",
+            "country": CONFIG["BOLT_COUNTRY"],
             "is_local_authentication_available": "false",
-            "language": "th",
+            "language": CONFIG["BOLT_LANGUAGE"],
             "gps_lat": str(lat),
             "gps_lng": str(lng),
             "gps_accuracy_m": "10.0",
             "gps_age": "0",
-            "user_id": "283617495",
-            "session_id": f"283617495u{int(time.time())}",
-            "distinct_id": "client-283617495",
-            "rh_session_id": "283617495u1759507023"
+            "user_id": CONFIG["BOLT_USER_ID"],
+            "session_id": f"{CONFIG['BOLT_USER_ID']}u{int(time.time())}",
+            "distinct_id": CONFIG["BOLT_DISTINCT_ID"],
+            "rh_session_id": CONFIG["BOLT_RH_SESSION_ID"]
         }
 
         headers = {
             "Host": "user.live.boltsvc.net",
-            "Authorization": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJkYXRhIjp7InVzZXJfaWQiOjI4MzYxNzQ5NSwidXNlcl9sb2dpbl9pZCI6NjAzNzMzNTg3fSwiaWF0IjoxNzU5NTU3NTcxLCJleHAiOjE3NTk1NjExNzF9.DEdZUUURblb1e4qMr_B_tytyDsA3N1sbPjzDZEXD8-A",
+            "Authorization": f"Bearer {CONFIG['BOLT_BEARER_TOKEN']}",
             "Content-Type": "application/json; charset=UTF-8",
             "Accept-Encoding": "gzip, deflate, br",
             "User-Agent": "okhttp/4.12.0"
