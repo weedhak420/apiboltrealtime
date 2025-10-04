@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ระบบติดตามรถแท็กซี่ - Multi-location Real-time Tracking</title>
+    
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/leaflet-rotatedmarker@0.2.0/leaflet.rotatedMarker.min.js"></script>
+    
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            overflow: hidden;
+        }
+
+        #container {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            padding: 20px;
+            gap: 20px;
+        }
+
+        #header {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border-radius: 16px;
+            padding: 20px 30px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+            animation: slideDown 0.5s ease-out;
+        }
+
+        @keyframes slideDown {
+            from { transform: translateY(-100%); opacity: 0; }
+            to { transform: translateY(0); opacity: 1; }
+        }
+
+        #header-content {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 20px;
+        }
+
+        #title {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        #title h1 {
+            font-size: 24px;
+            font-weight: 700;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        #stats-panel {
+            display: flex;
+            gap: 30px;
+            flex-wrap: wrap;
+        }
+
+        .stat-item {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .stat-label {
+            font-size: 11px;
+            color: #64748b;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 4px;
+        }
+
+        .stat-value {
+            font-size: 24px;
+            font-weight: 800;
+            color: #1e293b;
+        }
+
+        .stat-value.highlight {
+            color: #667eea;
+        }
+
+        .stat-subtext {
+            font-size: 10px;
+            color: #94a3b8;
+            margin-top: 2px;
+        }
+
+        #connection-status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        #connection-status.connected {
+            background: #dcfce7;
+            color: #166534;
+        }
+
+        #connection-status.disconnected {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            animation: pulse 2s ease-in-out infinite;
+        }
+
+        .status-dot.connected { background: #22c55e; }
+        .status-dot.disconnected { background: #ef4444; }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.5; transform: scale(1.2); }
+        }
+
+        #map-container {
+            flex: 1;
+            background: white;
+            border-radius: 16px;
+            overflow: hidden;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+            animation: fadeIn 0.5s ease-out 0.2s both;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: scale(0.95); }
+            to { opacity: 1; transform: scale(1); }
+        }
+
+        #map {
+            width: 100%;
+            height: 100%;
+        }
+
+        .vehicle-popup h3 {
+            margin: 0 0 8px 0;
+            color: #1e293b;
+            font-size: 16px;
+            font-weight: 700;
+        }
+
+        .vehicle-popup p {
+            margin: 4px 0;
+            color: #64748b;
+            font-size: 13px;
+        }
+
+        #debug-toggle {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 12px;
+            cursor: pointer;
+            font-weight: 600;
+            z-index: 9999;
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+            transition: all 0.3s;
+        }
+
+        #debug-toggle:hover {
+            background: #764ba2;
+            transform: translateY(-2px);
+            box-shadow: 0 6px 16px rgba(102, 126, 234, 0.5);
+        }
+
+        #debug-panel {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background: rgba(0, 0, 0, 0.95);
+            color: #00ff00;
+            padding: 20px;
+            border-radius: 12px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            max-width: 500px;
+            max-height: 400px;
+            overflow-y: auto;
+            z-index: 10000;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+        }
+
+        #debug-panel h4 {
+            margin: 0 0 12px 0;
+            color: #00ff00;
+            font-size: 14px;
+            border-bottom: 2px solid #00ff00;
+            padding-bottom: 8px;
+        }
+
+        #debug-panel pre {
+            margin: 8px 0;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            line-height: 1.6;
+        }
+
+        .debug-hidden {
+            display: none;
+        }
+
+        @media (max-width: 768px) {
+            #container {
+                padding: 10px;
+                gap: 10px;
+            }
+
+            #header {
+                padding: 15px 20px;
+            }
+
+            #header-content {
+                flex-direction: column;
+            }
+
+            #stats-panel {
+                width: 100%;
+                justify-content: space-around;
+            }
+
+            .stat-value {
+                font-size: 20px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <div id="header">
+            <div id="header-content">
+                <div id="title">
+                    <svg width="32" height="32" viewBox="0 0 24 24" fill="none">
+                        <path d="M12 2L2 7L12 12L22 7L12 2Z" fill="#667eea"/>
+                        <path d="M2 17L12 22L22 17M2 12L12 17L22 12" stroke="#764ba2" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                    <h1>🚕 ระบบติดตามรถแท็กซี่</h1>
+                </div>
+                
+                <div id="stats-panel">
+                    <div class="stat-item">
+                        <span class="stat-label">รถทั้งหมด</span>
+                        <span class="stat-value highlight" id="vehicle-count">0</span>
+                    </div>
+                    
+                    <div class="stat-item">
+                        <span class="stat-label">พื้นที่ครอบคลุม</span>
+                        <span class="stat-value" id="location-count">0</span>
+                        <span class="stat-subtext">locations</span>
+                    </div>
+                    
+                    <div class="stat-item">
+                        <span class="stat-label">ความเร็ว</span>
+                        <span class="stat-value" id="fetch-time">-</span>
+                        <span class="stat-subtext">seconds</span>
+                    </div>
+                    
+                    <div class="stat-item">
+                        <span class="stat-label">อัปเดตล่าสุด</span>
+                        <span class="stat-value" style="font-size: 16px;" id="last-update">-</span>
+                    </div>
+                    
+                    <div id="connection-status" class="disconnected">
+                        <span class="status-dot disconnected"></span>
+                        <span id="connection-text">กำลังเชื่อมต่อ...</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="map-container">
+            <div id="map"></div>
+        </div>
+    </div>
+
+    <button id="debug-toggle" onclick="toggleDebug()">🐛 Debug</button>
+    <div id="debug-panel" class="debug-hidden">
+        <h4>📊 Debug Information</h4>
+        <div id="debug-content"></div>
+    </div>
+
+    <script>
+        // Configuration
+        const MAP_CENTER = [18.7883, 98.9853];
+        const MAP_ZOOM = 12;
+
+        let debugVisible = false;
+        let debugLogs = [];
+        let markers = {};
+
+        function toggleDebug() {
+            debugVisible = !debugVisible;
+            const panel = document.getElementById('debug-panel');
+            const button = document.getElementById('debug-toggle');
+            
+            if (debugVisible) {
+                panel.classList.remove('debug-hidden');
+                button.textContent = '❌ ซ่อน';
+            } else {
+                panel.classList.add('debug-hidden');
+                button.textContent = '🐛 Debug';
+            }
+        }
+
+        function addDebugLog(message, data = null) {
+            const timestamp = new Date().toLocaleTimeString('th-TH');
+            const logEntry = `[${timestamp}] ${message}`;
+            
+            console.log('[Bolt]', message, data || '');
+            
+            debugLogs.unshift(logEntry);
+            if (data) {
+                debugLogs.unshift(JSON.stringify(data, null, 2));
+            }
+            
+            if (debugLogs.length > 50) {
+                debugLogs = debugLogs.slice(0, 50);
+            }
+            
+            const debugContent = document.getElementById('debug-content');
+            if (debugContent) {
+                debugContent.innerHTML = '<pre>' + debugLogs.join('\n') + '</pre>';
+            }
+        }
+
+        // Initialize map
+        addDebugLog('🗺️ Initializing map...');
+        const map = L.map('map').setView(MAP_CENTER, MAP_ZOOM);
+        
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap contributors',
+            maxZoom: 19
+        }).addTo(map);
+        addDebugLog('✅ Map initialized');
+
+        // Socket.IO connection
+        addDebugLog('🔌 Connecting to Socket.IO...');
+        const socket = io({
+            transports: ['websocket', 'polling'],
+            reconnection: true,
+            reconnectionDelay: 1000,
+            reconnectionAttempts: 10
+        });
+
+        socket.on('connect', () => {
+            addDebugLog('✅ Socket connected!');
+            updateConnectionStatus(true);
+        });
+
+        socket.on('disconnect', () => {
+            addDebugLog('❌ Socket disconnected');
+            updateConnectionStatus(false);
+        });
+
+        socket.on('connect_error', (error) => {
+            addDebugLog('❌ Connection error: ' + error.message);
+            updateConnectionStatus(false);
+        });
+
+        socket.on('vehicles_update', (data) => {
+            addDebugLog('📡 Received vehicles update');
+            
+            const vehicles = data.vehicles || [];
+            const count = data.count || vehicles.length;
+            const locationsCount = data.locations_count || 0;
+            const fetchTime = data.fetch_time || 0;
+            
+            addDebugLog(`📊 Stats: ${count} vehicles, ${locationsCount} locations, ${fetchTime.toFixed(2)}s`);
+            
+            if (vehicles.length > 0) {
+                addDebugLog('🚗 First vehicle sample:', vehicles[0]);
+            }
+            
+            updateVehicles(vehicles);
+            updateStats(count, locationsCount, fetchTime);
+        });
+
+        function updateConnectionStatus(connected) {
+            const statusEl = document.getElementById('connection-status');
+            const textEl = document.getElementById('connection-text');
+            const dotEl = statusEl.querySelector('.status-dot');
+
+            if (connected) {
+                statusEl.className = 'connected';
+                textEl.textContent = 'เชื่อมต่อแล้ว';
+                dotEl.className = 'status-dot connected';
+            } else {
+                statusEl.className = 'disconnected';
+                textEl.textContent = 'ไม่ได้เชื่อมต่อ';
+                dotEl.className = 'status-dot disconnected';
+            }
+        }
+
+        function updateVehicles(vehicles) {
+            const currentIds = new Set();
+            let markersCreated = 0;
+            let markersUpdated = 0;
+
+            vehicles.forEach(vehicle => {
+                if (!vehicle.id || !vehicle.lat || !vehicle.lng) {
+                    return;
+                }
+
+                currentIds.add(vehicle.id);
+
+                if (markers[vehicle.id]) {
+                    // Update existing marker
+                    const marker = markers[vehicle.id];
+                    const newLatLng = L.latLng(vehicle.lat, vehicle.lng);
+                    
+                    marker.setLatLng(newLatLng);
+                    
+                    if (vehicle.bearing !== undefined) {
+                        marker.setRotationAngle(vehicle.bearing);
+                    }
+                    markersUpdated++;
+                } else {
+                    // Create new marker
+                    const iconUrl = vehicle.icon_url || 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-blue.png';
+                    
+                    const icon = L.icon({
+                        iconUrl: iconUrl,
+                        iconSize: [25, 41],
+                        iconAnchor: [12, 41],
+                        popupAnchor: [1, -34],
+                        shadowSize: [41, 41]
+                    });
+
+                    const marker = L.marker([vehicle.lat, vehicle.lng], {
+                        icon: icon,
+                        rotationAngle: vehicle.bearing || 0,
+                        rotationOrigin: 'center center'
+                    }).addTo(map);
+
+                    // Popup content
+                    const popupContent = `
+                        <div class="vehicle-popup">
+                            <h3>🚕 ${vehicle.category_name || 'แท็กซี่'}</h3>
+                            <p><strong>รหัส:</strong> ${vehicle.id}</p>
+                            <p><strong>ตำแหน่ง:</strong> ${vehicle.lat.toFixed(6)}, ${vehicle.lng.toFixed(6)}</p>
+                            <p><strong>ทิศทาง:</strong> ${vehicle.bearing || 0}°</p>
+                            <p><strong>พื้นที่:</strong> ${vehicle.source_location || 'N/A'}</p>
+                        </div>
+                    `;
+                    marker.bindPopup(popupContent);
+
+                    markers[vehicle.id] = marker;
+                    markersCreated++;
+                }
+            });
+
+            // Remove old markers
+            let markersRemoved = 0;
+            Object.keys(markers).forEach(id => {
+                if (!currentIds.has(id)) {
+                    map.removeLayer(markers[id]);
+                    delete markers[id];
+                    markersRemoved++;
+                }
+            });
+
+            addDebugLog(`🎯 Markers: +${markersCreated} new, ~${markersUpdated} updated, -${markersRemoved} removed. Total: ${Object.keys(markers).length}`);
+        }
+
+        function updateStats(count, locationsCount, fetchTime) {
+            document.getElementById('vehicle-count').textContent = count;
+            document.getElementById('location-count').textContent = locationsCount;
+            document.getElementById('fetch-time').textContent = fetchTime.toFixed(2);
+            
+            const now = new Date();
+            const timeStr = now.toLocaleTimeString('th-TH', { 
+                hour: '2-digit', 
+                minute: '2-digit',
+                second: '2-digit'
+            });
+            document.getElementById('last-update').textContent = timeStr;
+        }
+
+        // Performance indicator
+        let lastUpdateTime = Date.now();
+        setInterval(() => {
+            const elapsed = (Date.now() - lastUpdateTime) / 1000;
+            if (elapsed > 10) {
+                addDebugLog(`⚠️ No update for ${elapsed.toFixed(0)}s`);
+            }
+        }, 5000);
+
+        socket.on('vehicles_update', (data) => {
+            lastUpdateTime = Date.now();
+            // ... rest of handler
+        });
+
+        addDebugLog('🚀 System ready, waiting for data...');
+    </script>
+</body>
+</html>
