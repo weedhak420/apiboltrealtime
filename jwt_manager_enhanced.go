@@ -1,14 +1,19 @@
 package main
 
 import (
+	"container/list"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"math/big"
+	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -26,6 +31,7 @@ type JWTKey struct {
 	CreatedAt time.Time       `json:"created_at"`
 	ExpiresAt time.Time       `json:"expires_at"`
 	Active    bool            `json:"active"`
+	GraceEnds time.Time       `json:"grace_period_ends"`
 }
 
 // JWTKeyManager manages JWT keys with rotation
@@ -56,6 +62,153 @@ type MemoryTokenRevocationStore struct {
 	mu            sync.RWMutex
 }
 
+// CachedRevocationStore wraps another TokenRevocationStore with an LRU cache to reduce backend lookups.
+type CachedRevocationStore struct {
+	backend     TokenRevocationStore
+	cache       *LRURevocationCache
+	gracePeriod time.Duration
+}
+
+// LRURevocationCache provides an in-memory LRU cache for revoked JTIs.
+type LRURevocationCache struct {
+	capacity int
+	mu       sync.Mutex
+	entries  map[string]*list.Element
+	order    *list.List
+}
+
+type cacheEntry struct {
+	jti       string
+	expiresAt time.Time
+}
+
+// NewCachedRevocationStore creates a cached revocation store wrapper.
+func NewCachedRevocationStore(backend TokenRevocationStore, capacity int, gracePeriod time.Duration) TokenRevocationStore {
+	if backend == nil {
+		return nil
+	}
+
+	return &CachedRevocationStore{
+		backend:     backend,
+		cache:       NewLRURevocationCache(capacity),
+		gracePeriod: gracePeriod,
+	}
+}
+
+// NewLRURevocationCache creates a new in-memory LRU cache for revoked tokens.
+func NewLRURevocationCache(capacity int) *LRURevocationCache {
+	if capacity <= 0 {
+		capacity = 512
+	}
+
+	return &LRURevocationCache{
+		capacity: capacity,
+		entries:  make(map[string]*list.Element),
+		order:    list.New(),
+	}
+}
+
+// Add stores a revoked JTI in the cache.
+func (c *LRURevocationCache) Add(jti string, expiresAt time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if elem, ok := c.entries[jti]; ok {
+		elem.Value.(*cacheEntry).expiresAt = expiresAt
+		c.order.MoveToFront(elem)
+		return
+	}
+
+	elem := c.order.PushFront(&cacheEntry{jti: jti, expiresAt: expiresAt})
+	c.entries[jti] = elem
+
+	if c.order.Len() > c.capacity {
+		tail := c.order.Back()
+		if tail != nil {
+			entry := tail.Value.(*cacheEntry)
+			delete(c.entries, entry.jti)
+			c.order.Remove(tail)
+		}
+	}
+}
+
+// Get returns whether the JTI is revoked and whether it was found in cache.
+func (c *LRURevocationCache) Get(jti string) (bool, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if elem, ok := c.entries[jti]; ok {
+		entry := elem.Value.(*cacheEntry)
+		if time.Now().After(entry.expiresAt) {
+			c.order.Remove(elem)
+			delete(c.entries, jti)
+			return false, false
+		}
+		c.order.MoveToFront(elem)
+		return true, true
+	}
+
+	return false, false
+}
+
+// Cleanup removes expired cache entries.
+func (c *LRURevocationCache) Cleanup() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	now := time.Now()
+	for elem := c.order.Back(); elem != nil; {
+		prev := elem.Prev()
+		entry := elem.Value.(*cacheEntry)
+		if now.After(entry.expiresAt) {
+			delete(c.entries, entry.jti)
+			c.order.Remove(elem)
+		}
+		elem = prev
+	}
+}
+
+// RevokeToken stores the revoked JTI in cache and backend.
+func (c *CachedRevocationStore) RevokeToken(ctx context.Context, jti string, expiresAt time.Time) error {
+	if expiresAt.IsZero() {
+		expiresAt = time.Now().Add(c.gracePeriod)
+	}
+
+	if err := c.backend.RevokeToken(ctx, jti, expiresAt); err != nil {
+		return err
+	}
+
+	c.cache.Add(jti, expiresAt)
+	return nil
+}
+
+// IsTokenRevoked checks cache first before delegating to backend.
+func (c *CachedRevocationStore) IsTokenRevoked(ctx context.Context, jti string) (bool, error) {
+	if revoked, ok := c.cache.Get(jti); ok {
+		return revoked, nil
+	}
+
+	revoked, err := c.backend.IsTokenRevoked(ctx, jti)
+	if err != nil {
+		return false, err
+	}
+
+	if revoked {
+		c.cache.Add(jti, time.Now().Add(c.gracePeriod))
+	}
+
+	return revoked, nil
+}
+
+// CleanupExpiredTokens cleans cache and backend.
+func (c *CachedRevocationStore) CleanupExpiredTokens(ctx context.Context) error {
+	c.cache.Cleanup()
+	if c.backend != nil {
+		return c.backend.CleanupExpiredTokens(ctx)
+	}
+	return nil
+}
+
 // JWTClaims represents JWT claims
 type JWTClaims struct {
 	UserID    string `json:"user_id"`
@@ -66,11 +219,18 @@ type JWTClaims struct {
 
 // EnhancedJWTManager provides enhanced JWT functionality
 type EnhancedJWTManager struct {
-	keyManager      *JWTKeyManager
-	revocationStore TokenRevocationStore
-	config          *JWTConfig
-	mu              sync.RWMutex
+	keyManager       *JWTKeyManager
+	revocationStore  TokenRevocationStore
+	config           *JWTConfig
+	mu               sync.RWMutex
+	validationLeeway time.Duration
+	gracePeriod      time.Duration
 }
+
+var (
+	errTokenRevoked = errors.New("token has been revoked")
+	errTokenExpired = errors.New("token has expired")
+)
 
 // Global JWT manager
 var (
@@ -87,6 +247,20 @@ func InitEnhancedJWTManager(config *JWTConfig, revocationStore TokenRevocationSt
 		return enhancedJWTManager, nil
 	}
 
+	gracePeriod := 5 * time.Minute
+	if gp := strings.TrimSpace(os.Getenv("JWT_KEY_GRACE_MINUTES")); gp != "" {
+		if parsed, err := time.ParseDuration(gp); err == nil {
+			if parsed >= 5*time.Minute {
+				gracePeriod = parsed
+			}
+		} else if minutes, err := strconv.Atoi(gp); err == nil {
+			candidate := time.Duration(minutes) * time.Minute
+			if candidate >= 5*time.Minute {
+				gracePeriod = candidate
+			}
+		}
+	}
+
 	// Create key manager
 	keyManager := &JWTKeyManager{
 		keys:        make(map[string]*JWTKey),
@@ -99,10 +273,26 @@ func InitEnhancedJWTManager(config *JWTConfig, revocationStore TokenRevocationSt
 		return nil, fmt.Errorf("failed to generate initial JWT key: %w", err)
 	}
 
+	if revocationStore == nil {
+		if redisClient != nil && isProductionEnv() {
+			revocationStore = NewRedisTokenRevocationStore(redisClient, "jwt")
+		} else if redisClient != nil {
+			revocationStore = NewRedisTokenRevocationStore(redisClient, "jwt")
+		} else {
+			revocationStore = NewMemoryTokenRevocationStore()
+		}
+	}
+
+	if revocationStore != nil {
+		revocationStore = NewCachedRevocationStore(revocationStore, 2048, gracePeriod)
+	}
+
 	enhancedJWTManager = &EnhancedJWTManager{
-		keyManager:      keyManager,
-		revocationStore: revocationStore,
-		config:          config,
+		keyManager:       keyManager,
+		revocationStore:  revocationStore,
+		config:           config,
+		validationLeeway: 2 * time.Minute,
+		gracePeriod:      gracePeriod,
 	}
 
 	// Start key rotation
@@ -135,14 +325,17 @@ func (km *JWTKeyManager) GenerateNewKey() error {
 	// Create key ID
 	keyID := uuid.New().String()
 
+	now := time.Now()
+
 	// Create JWT key
 	jwtKey := &JWTKey{
 		ID:        keyID,
 		Key:       privateKey,
 		PublicKey: &privateKey.PublicKey,
-		CreatedAt: time.Now(),
-		ExpiresAt: time.Now().Add(km.keyLifetime),
+		CreatedAt: now,
+		ExpiresAt: now.Add(km.keyLifetime),
 		Active:    true,
+		GraceEnds: now.Add(km.keyLifetime),
 	}
 
 	// Store key
@@ -168,17 +361,27 @@ func (km *JWTKeyManager) GetCurrentKey() *JWTKey {
 func (km *JWTKeyManager) GetKeyByID(keyID string) *JWTKey {
 	km.mu.RLock()
 	defer km.mu.RUnlock()
-	return km.keys[keyID]
+	key := km.keys[keyID]
+	if key == nil {
+		return nil
+	}
+
+	if time.Now().After(key.GraceEnds) {
+		return nil
+	}
+
+	return key
 }
 
 // RotateKey rotates the current key
-func (km *JWTKeyManager) RotateKey() error {
+func (km *JWTKeyManager) RotateKey(gracePeriod time.Duration) error {
 	km.mu.Lock()
 	defer km.mu.Unlock()
 
 	// Deactivate current key
 	if km.currentKey != nil {
 		km.currentKey.Active = false
+		km.currentKey.GraceEnds = time.Now().Add(gracePeriod)
 	}
 
 	// Generate new key
@@ -196,7 +399,7 @@ func (km *JWTKeyManager) RotateKey() error {
 func (km *JWTKeyManager) cleanupOldKeys() {
 	now := time.Now()
 	for keyID, key := range km.keys {
-		if now.After(key.ExpiresAt) {
+		if now.After(key.GraceEnds) {
 			delete(km.keys, keyID)
 			GetLogger().Info("Cleaned up expired JWT key", zap.String("key_id", keyID))
 		}
@@ -209,8 +412,12 @@ func (ejm *EnhancedJWTManager) startKeyRotation() {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		if err := ejm.keyManager.RotateKey(); err != nil {
+		if err := ejm.keyManager.RotateKey(ejm.gracePeriod); err != nil {
 			GetLogger().Error("Failed to rotate JWT key", zap.Error(err))
+			continue
+		}
+		if key := ejm.keyManager.GetCurrentKey(); key != nil {
+			GetLogger().Info("Rotated JWT key", zap.String("key_id", key.ID), zap.Time("grace_until", key.GraceEnds))
 		}
 	}
 }
@@ -222,8 +429,10 @@ func (ejm *EnhancedJWTManager) startTokenCleanup() {
 
 	for range ticker.C {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		if err := ejm.revocationStore.CleanupExpiredTokens(ctx); err != nil {
-			GetLogger().Error("Failed to cleanup expired tokens", zap.Error(err))
+		if ejm.revocationStore != nil {
+			if err := ejm.revocationStore.CleanupExpiredTokens(ctx); err != nil {
+				GetLogger().Error("Failed to cleanup expired tokens", zap.Error(err))
+			}
 		}
 		cancel()
 	}
@@ -268,11 +477,13 @@ func (ejm *EnhancedJWTManager) GenerateAccessToken(ctx context.Context, userID, 
 		return "", fmt.Errorf("failed to sign token: %w", err)
 	}
 
-	GetLogger().Info("Generated access token",
-		zap.String("user_id", userID),
-		zap.String("jti", claims.ID),
-		zap.Time("expires_at", claims.ExpiresAt.Time),
-	)
+	if logger := GetLogger(); logger != nil {
+		logger.Info("Generated access token",
+			zap.String("user_id", userID),
+			zap.String("jti", claims.ID),
+			zap.Time("expires_at", claims.ExpiresAt.Time),
+		)
+	}
 
 	return tokenString, nil
 }
@@ -316,11 +527,13 @@ func (ejm *EnhancedJWTManager) GenerateRefreshToken(ctx context.Context, userID,
 		return "", fmt.Errorf("failed to sign token: %w", err)
 	}
 
-	GetLogger().Info("Generated refresh token",
-		zap.String("user_id", userID),
-		zap.String("jti", claims.ID),
-		zap.Time("expires_at", claims.ExpiresAt.Time),
-	)
+	if logger := GetLogger(); logger != nil {
+		logger.Info("Generated refresh token",
+			zap.String("user_id", userID),
+			zap.String("jti", claims.ID),
+			zap.Time("expires_at", claims.ExpiresAt.Time),
+		)
+	}
 
 	return tokenString, nil
 }
@@ -329,29 +542,43 @@ func (ejm *EnhancedJWTManager) GenerateRefreshToken(ctx context.Context, userID,
 func (ejm *EnhancedJWTManager) ValidateToken(ctx context.Context, tokenString string) (*JWTClaims, error) {
 	ejm.mu.RLock()
 	keyManager := ejm.keyManager
+	revocationStore := ejm.revocationStore
+	config := ejm.config
+	leeway := ejm.validationLeeway
 	ejm.mu.RUnlock()
 
-	// Parse token without validation first to get key ID
+	parserOptions := []jwt.ParserOption{
+		jwt.WithLeeway(leeway),
+		jwt.WithValidMethods([]string{jwt.SigningMethodRS256.Alg()}),
+	}
+
+	if config != nil {
+		if config.Audience != "" {
+			parserOptions = append(parserOptions, jwt.WithAudience(config.Audience))
+		}
+		if config.Issuer != "" {
+			parserOptions = append(parserOptions, jwt.WithIssuer(config.Issuer))
+		}
+	}
+
+	// Parse token and verify signature based on key ID
 	token, err := jwt.ParseWithClaims(tokenString, &JWTClaims{}, func(token *jwt.Token) (interface{}, error) {
-		// Check signing method
-		if _, ok := token.Method.(*jwt.SigningMethodRSA); !ok {
-			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		if token.Method.Alg() != jwt.SigningMethodRS256.Alg() {
+			return nil, fmt.Errorf("unexpected signing method: %s", token.Method.Alg())
 		}
 
-		// Get key ID from header
 		keyID, ok := token.Header["kid"].(string)
-		if !ok {
+		if !ok || keyID == "" {
 			return nil, fmt.Errorf("missing key ID in token header")
 		}
 
-		// Get key by ID
 		key := keyManager.GetKeyByID(keyID)
 		if key == nil {
 			return nil, fmt.Errorf("key not found: %s", keyID)
 		}
 
 		return key.PublicKey, nil
-	})
+	}, parserOptions...)
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse token: %w", err)
@@ -368,39 +595,108 @@ func (ejm *EnhancedJWTManager) ValidateToken(ctx context.Context, tokenString st
 		return nil, fmt.Errorf("invalid token claims")
 	}
 
-	// Check if token is revoked
-	if ejm.revocationStore != nil {
-		revoked, err := ejm.revocationStore.IsTokenRevoked(ctx, claims.ID)
+	if claims.ExpiresAt != nil && time.Now().After(claims.ExpiresAt.Time.Add(leeway)) {
+		if logger := GetLogger(); logger != nil {
+			logger.Warn("Token validation failed - expired",
+				zap.String("user_id", claims.UserID),
+				zap.String("jti", claims.ID),
+				zap.Time("expires_at", claims.ExpiresAt.Time),
+			)
+		}
+		return claims, errTokenExpired
+	}
+
+	if revocationStore != nil {
+		revoked, err := revocationStore.IsTokenRevoked(ctx, claims.ID)
 		if err != nil {
-			GetLogger().Error("Failed to check token revocation", zap.Error(err))
-		} else if revoked {
-			return nil, fmt.Errorf("token has been revoked")
+			if logger := GetLogger(); logger != nil {
+				logger.Error("Failed to check token revocation",
+					zap.Error(err),
+					zap.String("user_id", claims.UserID),
+					zap.String("jti", claims.ID),
+					zap.Time("expires_at", claims.ExpiresAt.Time),
+				)
+			}
+			if metrics := GetMetricsCollector(); metrics != nil {
+				metrics.RecordAPIError("jwt_validation", "revocation_lookup_error")
+			}
+			return nil, fmt.Errorf("revocation check failed: %w", err)
+		}
+		if revoked {
+			if logger := GetLogger(); logger != nil {
+				logger.Warn("Token validation failed - revoked",
+					zap.String("user_id", claims.UserID),
+					zap.String("jti", claims.ID),
+					zap.Time("expires_at", claims.ExpiresAt.Time),
+				)
+			}
+			if metrics := GetMetricsCollector(); metrics != nil {
+				metrics.RecordAPIError("jwt_validation", "revoked")
+			}
+			return claims, errTokenRevoked
 		}
 	}
 
 	return claims, nil
 }
 
+// IsTokenRevoked checks if a token with the given JTI has been revoked.
+func (ejm *EnhancedJWTManager) IsTokenRevoked(ctx context.Context, jti string) (bool, error) {
+	if ejm == nil || ejm.revocationStore == nil {
+		return false, nil
+	}
+	return ejm.revocationStore.IsTokenRevoked(ctx, jti)
+}
+
 // RevokeToken revokes a token
 func (ejm *EnhancedJWTManager) RevokeToken(ctx context.Context, tokenString string) error {
-	// Parse token to get JTI
-	token, err := jwt.ParseWithClaims(tokenString, &JWTClaims{}, func(token *jwt.Token) (interface{}, error) {
-		// We don't need to validate the signature for revocation
-		return []byte(""), nil
-	})
-
+	claims, err := ejm.ValidateToken(ctx, tokenString)
 	if err != nil {
-		return fmt.Errorf("failed to parse token: %w", err)
+		switch {
+		case errors.Is(err, errTokenRevoked):
+			return nil
+		case errors.Is(err, errTokenExpired):
+			// proceed with revocation using extracted claims even if expired
+		default:
+			if logger := GetLogger(); logger != nil {
+				logger.Error("Failed to validate token before revocation", zap.Error(err))
+			}
+			if metrics := GetMetricsCollector(); metrics != nil {
+				metrics.RecordAPIError("jwt_revocation", "validation_failed")
+			}
+			return fmt.Errorf("failed to validate token before revocation: %w", err)
+		}
 	}
 
-	claims, ok := token.Claims.(*JWTClaims)
-	if !ok {
-		return fmt.Errorf("invalid token claims")
+	if claims == nil || claims.ID == "" {
+		return errors.New("unable to extract claims for revocation")
 	}
 
-	// Revoke token
-	if ejm.revocationStore != nil {
-		return ejm.revocationStore.RevokeToken(ctx, claims.ID, claims.ExpiresAt.Time)
+	if ejm.revocationStore == nil {
+		return nil
+	}
+
+	expiresAt := time.Now().Add(ejm.gracePeriod)
+	if claims.ExpiresAt != nil {
+		expiresAt = claims.ExpiresAt.Time
+	}
+
+	if err := ejm.revocationStore.RevokeToken(ctx, claims.ID, expiresAt); err != nil {
+		if logger := GetLogger(); logger != nil {
+			logger.Error("Failed to revoke token", zap.Error(err), zap.String("user_id", claims.UserID), zap.String("jti", claims.ID), zap.Time("expires_at", expiresAt))
+		}
+		if metrics := GetMetricsCollector(); metrics != nil {
+			metrics.RecordAPIError("jwt_revocation", "backend_error")
+		}
+		return fmt.Errorf("failed to revoke token: %w", err)
+	}
+
+	if logger := GetLogger(); logger != nil {
+		logger.Info("Token revoked",
+			zap.String("user_id", claims.UserID),
+			zap.String("jti", claims.ID),
+			zap.Time("expires_at", expiresAt),
+		)
 	}
 
 	return nil
@@ -572,4 +868,9 @@ func (m *MemoryTokenRevocationStore) CleanupExpiredTokens(ctx context.Context) e
 	}
 
 	return nil
+}
+
+func isProductionEnv() bool {
+	env := strings.ToLower(strings.TrimSpace(os.Getenv("APP_ENV")))
+	return env == "prod" || env == "production"
 }
